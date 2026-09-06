@@ -1,0 +1,252 @@
+---
+title: "EDA"
+author: "Youn Yeowon"
+date: "2025-11-04"
+output: html_document
+---
+```{r}
+knitr::opts_chunk$set(cache = TRUE, message = FALSE, warning = FALSE)
+## Load libraries
+library(tidymodels)
+library(readxl)
+library(stringr)
+library(skimr)
+library(ggcorrplot)
+
+knitr::opts_chunk$set(fig.path = "figures/")
+```
+
+```{r}
+## Load Data
+original_df <- read.csv('../Data/medical_insurance.csv')
+feature_info <- read_excel('C:/Users/yjh60/Desktop/Final_Project/변수설명.xlsx')
+```
+```{r}
+# feature_info 병합되어 Category 컬럼의 값이 NA로 존재하는 행 채우기
+feature_info[1:11,'Category'] <- 'Demographics&Socioeconomic'
+feature_info[12:14,'Category'] <- 'Lifestyle&Habits'
+feature_info[15:31,'Category'] <- 'Health&Clinical'
+feature_info[32:41,'Category'] <- 'Healthcare Utilization&Procedures'
+feature_info[42:48,'Category'] <- 'Insurance&Policy'
+feature_info[49:54,'Category'] <- 'Medical Costs&Claims'
+```
+
+```{r}
+length(original_df$person_id);n_unique(original_df$person_id) # 중복X
+```
+
+```{r}
+## Filtering
+# ID, Data Leakage, 단순 치료비 추정이 될 수 있는 컬럼 제외
+column_to_use <- feature_info %>% filter(Use=='Yes' | Use=='Target') %>% pull(Column)
+medical <- original_df %>% dplyr::select(all_of(column_to_use))
+
+head(medical)
+```
+
+```{r}
+## Category별 컬럼 리스트 저장
+# > unique(feature_info$Category)
+# [1] "Demographics&Socioeconomic"       
+# [2] "Lifestyle&Habits"                 
+# [3] "Health&Clinical"                  
+# [4] "Healthcare Utilization&Procedures"
+# [5] "Insurance&Policy"                 
+# [6] "Medical Costs&Claims"  
+# %in% colnames(clean_medical)
+Demographic <- feature_info %>% filter(Category=="Demographics&Socioeconomic") %>% pull(Column)
+Demographic <- Demographic[Demographic %in% colnames(medical)]
+
+Lifestyle <- feature_info %>% filter(Category=="Lifestyle&Habits") %>% pull(Column)
+Lifestyle <- Lifestyle[Lifestyle %in% colnames(medical)]
+
+HealthInfo <- feature_info %>% filter(Category=="Health&Clinical") %>% pull(Column)
+HealthInfo <- HealthInfo[HealthInfo %in% colnames(medical)]
+
+Healthcare <- feature_info %>% filter(Category=="Healthcare Utilization&Procedures") %>% pull(Column)
+Healthcare <- Healthcare[Healthcare %in% colnames(medical)]
+
+Policy <- feature_info %>% filter(Category=="Insurance&Policy") %>% pull(Column)
+Policy <- Policy[Policy %in% colnames(medical)]
+
+cols_per_category <- list(Demographic, Lifestyle, HealthInfo, Healthcare, Policy)
+saveRDS(cols_per_category, file='../useful/카테고리별컬럼목록.rds')
+```
+
+```{r}
+## Clean the data : clean_medical
+# Categorical var : chr, int -> factor
+categorical_col <- feature_info %>% filter(str_starts(Type,'categorical')) %>% pull(Column)
+categorical_col <- categorical_col[categorical_col %in% colnames(medical)]
+
+clean_medical <- medical %>% mutate(across(all_of(categorical_col), as.factor))
+
+# Numerical var
+numerical_col <- clean_medical %>% select(!all_of(categorical_col)) %>% names()
+
+saveRDS(categorical_col, file='../useful/범주형변수목록.rds')
+saveRDS(numerical_col, file='../useful/수치형변수목록.rds')
+write.csv(clean_medical, file='../mydata/clean_medical.csv') # save the data
+```
+
+```{r}
+# describe the dataset
+skim(clean_medical)
+```
+
+```{r}
+## Distribution : Demographic
+clean_medical %>% dplyr::select(all_of(Demographic)) %>% dplyr::select(where(is.factor)) %>%
+  pivot_longer(cols=everything(),names_to = "predictor", values_to = "value") %>%  
+  ggplot(aes(x = value, fill=value)) + 
+  geom_bar() +
+  facet_wrap(~ predictor, scales = "free_x") +  
+  labs(x = "Predictors") +
+  guides(fill = "none")
+
+clean_medical %>% dplyr::select(all_of(Demographic)) %>% dplyr::select(where(is.numeric)) %>%
+  pivot_longer(cols=everything(),names_to = "predictor", values_to = "value") %>%  
+  ggplot(aes(x = value)) + 
+  geom_histogram(fill='darkgreen') +
+  facet_wrap(~ predictor, scales = "free_x") +  
+  labs(x = "Predictors") +
+  guides(fill = "none")
+```
+
+```{r}
+## Distribution : Lifestyle
+clean_medical %>% dplyr::select(all_of(Lifestyle)) %>% dplyr::select(where(is.factor)) %>%
+  pivot_longer(cols=everything(),names_to = "predictor", values_to = "value") %>%  
+  ggplot(aes(x = value, fill=value)) + 
+  geom_bar() +
+  facet_wrap(~ predictor, scales = "free_x") +  
+  labs(x = "Predictors") +
+  guides(fill = "none")
+
+clean_medical %>% dplyr::select(all_of(Lifestyle)) %>% dplyr::select(where(is.numeric)) %>%
+  pivot_longer(cols=everything(),names_to = "predictor", values_to = "value") %>%  
+  ggplot(aes(x = value)) + 
+  geom_histogram(fill='darkgreen') +
+  facet_wrap(~ predictor, scales = "free_x") +  
+  labs(x = "Predictors") +
+  guides(fill = "none")
+```
+
+```{r}
+## Distribution : HealthInfo
+clean_medical %>% dplyr::select(all_of(HealthInfo)) %>% dplyr::select(where(is.factor)) %>%
+  pivot_longer(cols=everything(),names_to = "predictor", values_to = "value") %>%  
+  ggplot(aes(x = value, fill=value)) + 
+  geom_bar() +
+  facet_wrap(~ predictor, scales = "free_x") +  
+  labs(x = "Predictors") +
+  guides(fill = "none")
+
+clean_medical %>% dplyr::select(all_of(HealthInfo)) %>% dplyr::select(where(is.numeric)) %>%
+  pivot_longer(cols=everything(),names_to = "predictor", values_to = "value") %>%  
+  ggplot(aes(x = value)) + 
+  geom_histogram(fill='darkgreen') +
+  facet_wrap(~ predictor, scales = "free_x") +  
+  labs(x = "Predictors") +
+  guides(fill = "none")
+```
+
+```{r}
+## Distribution : Healthcare
+clean_medical %>% dplyr::select(all_of(Healthcare)) %>% dplyr::select(where(is.factor)) %>%
+  pivot_longer(cols=everything(),names_to = "predictor", values_to = "value") %>%  
+  ggplot(aes(x = value, fill=value)) + 
+  geom_bar() +
+  facet_wrap(~ predictor, scales = "free_x") +  
+  labs(x = "Predictors") +
+  guides(fill = "none")
+
+clean_medical %>% dplyr::select(all_of(Healthcare)) %>% dplyr::select(where(is.numeric)) %>%
+  pivot_longer(cols=everything(),names_to = "predictor", values_to = "value") %>%  
+  ggplot(aes(x = value)) + 
+  geom_histogram(fill='darkgreen') +
+  facet_wrap(~ predictor, scales = "free_x") +  
+  labs(x = "Predictors") +
+  guides(fill = "none")
+```
+
+```{r}
+## Distribution : Policy
+clean_medical %>% dplyr::select(all_of(Policy)) %>% dplyr::select(where(is.numeric)) %>%
+  pivot_longer(cols=everything(),names_to = "predictor", values_to = "value") %>%  
+  ggplot(aes(x = value)) + 
+  geom_histogram(fill='darkgreen') +
+  facet_wrap(~ predictor, scales = "free_x") +  
+  labs(x = "Predictors") +
+  guides(fill = "none")
+```
+
+```{r}
+clean_medical %>%   
+  ggplot(aes(x = annual_medical_cost)) + 
+  geom_histogram(fill='darkgreen')
+```
+
+```{r warning=FALSE}
+## Correlation between the Predictors
+corr <- round(cor(clean_medical %>% dplyr::select(where(is.numeric))), 4)
+ggcorrplot(corr,
+           colors = c("#6D9EC1", "white", "#E46726")) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+```{r}
+## categorical vs Target
+# 15개
+clean_medical %>% dplyr::select(categorical_col[1:3], annual_medical_cost) %>%
+  pivot_longer(cols=-annual_medical_cost, names_to = "predictor", values_to = "value") %>%  
+  ggplot(aes(x = value, y=annual_medical_cost, fill=value)) + 
+  geom_boxplot() +
+  facet_wrap(~ predictor, scales = "free_x") +  
+  labs(x = "Predictors") +
+  guides(fill = "none")
+
+clean_medical %>% dplyr::select(categorical_col[4:6], annual_medical_cost) %>%
+  pivot_longer(cols=-annual_medical_cost, names_to = "predictor", values_to = "value") %>%  
+  ggplot(aes(x = value, y=annual_medical_cost, fill=value)) + 
+  geom_boxplot() +
+  facet_wrap(~ predictor, scales = "free_x") +  
+  labs(x = "Predictors") +
+  guides(fill = "none")
+
+clean_medical %>% dplyr::select(categorical_col[7:9], annual_medical_cost) %>%
+  pivot_longer(cols=-annual_medical_cost, names_to = "predictor", values_to = "value") %>%  
+  ggplot(aes(x = value, y=annual_medical_cost, fill=value)) + 
+  geom_boxplot() +
+  facet_wrap(~ predictor, scales = "free_x") +  
+  labs(x = "Predictors") +
+  guides(fill = "none")
+
+clean_medical %>% dplyr::select(categorical_col[10:12], annual_medical_cost) %>%
+  pivot_longer(cols=-annual_medical_cost, names_to = "predictor", values_to = "value") %>%  
+  ggplot(aes(x = value, y=annual_medical_cost, fill=value)) + 
+  geom_boxplot() +
+  facet_wrap(~ predictor, scales = "free_x") +  
+  labs(x = "Predictors") +
+  guides(fill = "none")
+
+clean_medical %>% dplyr::select(categorical_col[13:15], annual_medical_cost) %>%
+  pivot_longer(cols=-annual_medical_cost, names_to = "predictor", values_to = "value") %>%  
+  ggplot(aes(x = value, y=annual_medical_cost, fill=value)) + 
+  geom_boxplot() +
+  facet_wrap(~ predictor, scales = "free_x") +  
+  labs(x = "Predictors") +
+  guides(fill = "none")
+```
+
+```{r}
+## numerical predictors vs Target
+clean_medical %>% dplyr::select(-all_of(categorical_col), annual_medical_cost) %>%
+  pivot_longer(cols=-annual_medical_cost, names_to = "predictor", values_to = "value") %>%  
+  ggplot(aes(x = value, y=annual_medical_cost, fill=value)) + 
+  geom_point() +
+  facet_wrap(~ predictor, scales = "free_x") +  
+  labs(x = "Predictors") +
+  guides(fill = "none")
+```
+
