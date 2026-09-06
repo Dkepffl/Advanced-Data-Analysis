@@ -1,0 +1,130 @@
+---
+title: "Preprocessing"
+author: "Youn Yeowon"
+date: "2025-11-19"
+output: html_document
+---
+
+```{r}
+knitr::opts_chunk$set(cache = TRUE, message = FALSE, warning = FALSE)
+
+## Load libraries
+library(tidymodels)
+library(readxl)
+library(writexl)
+library(agua)
+
+# robust scaler : https://wikidocs.net/89704
+# https://stackoverflow.com/questions/73805543/robust-scaler-in-recipes-package
+# devtools::install_github("EmilHvitfeldt/extrasteps")
+
+library(extrasteps)
+h2o_start()
+```
+
+```{r}
+## load data
+medical <- read.csv('../mydata/processed_medical.csv')
+
+## load etc.
+cols_per_category <- readRDS('../useful/카테고리별컬럼목록.rds')
+categorical_col <- readRDS('../useful/processed_범주형변수목록.rds')
+numerical_col <- readRDS('../useful/processed_수치형변수목록.rds')
+
+## as.factor
+medical <- medical %>% mutate(across(all_of(categorical_col), as.factor))
+```
+
+```{r}
+## split the data
+data_split <- initial_validation_split(medical, prop=c(0.6, 0.2), strata=annual_medical_cost)
+train <- training(data_split); valid <- validation(data_split);test <- testing(data_split)
+
+cv_folds <- vfold_cv(train, v=3, strata=annual_medical_cost)
+```
+
+```{r}
+basic_rec <-
+  recipe(annual_medical_cost ~ ., data = train) %>% 
+  step_zv(all_predictors()) %>%  
+  step_YeoJohnson(all_numeric_predictors()) %>%  
+  step_corr(all_numeric_predictors(), threshold=0.9)
+
+normalized_rec <-
+  basic_rec %>%
+  step_normalize(all_numeric_predictors()) 
+
+dummy_rec <-
+  normalized_rec %>%
+  step_dummy(all_nominal_predictors())
+```
+
+```{r}
+auto_spec <-
+  auto_ml() %>%
+  set_engine("h2o", max_runtime_secs = 60*3, seed = 1) %>%
+  set_mode("regression")
+
+auto_wflow <-
+  workflow() %>%
+  add_model(auto_spec) %>%
+  add_recipe(basic_rec)
+
+auto_fit1 <- fit(auto_wflow, data = train)
+
+extract_fit_parsnip(auto_fit1)
+```
+
+```{r}
+auto_wflow <-
+  auto_wflow %>%
+  remove_recipe() %>%
+  add_recipe(normalized_rec)
+
+auto_fit2 <- fit(auto_wflow, data = train)
+
+extract_fit_parsnip(auto_fit2)
+```
+
+```{r}
+auto_wflow <-
+  auto_wflow %>%
+  remove_recipe() %>%
+  add_recipe(dummy_rec)
+
+auto_fit3 <- fit(auto_wflow, data = train)
+
+extract_fit_parsnip(auto_fit3)
+```
+
+
+
+```{r}
+pred_results <- predict(auto_fit, new_data = test) %>%
+  bind_cols(test %>% select(annual_medical_cost))
+
+evaluation <- pred_results %>%
+  mutate(
+    real_pred = exp(.pred) - 1, 
+    real_truth = annual_medical_cost 
+  ) 
+```
+
+```{r}
+metrics_summary <- evaluation %>%
+  metrics(truth = real_truth, estimate = real_pred)
+
+print(metrics_summary)
+```
+
+```{r}
+library(ggplot2)
+evaluation %>%
+  ggplot(aes(x = real_truth, y = real_pred)) +
+  geom_point(alpha = 0.5, color = "midnightblue") +
+  geom_abline(lty = 2, color = "red") +
+  labs(title = "Actual vs Predicted Medical Cost",
+       x = "Actual Cost ($)", y = "Predicted Cost ($)") +
+  coord_obs_pred()
+```
+
