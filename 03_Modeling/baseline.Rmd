@@ -1,0 +1,310 @@
+---
+title: "Preprocessing"
+author: "Youn Yeowon"
+date: "2025-11-19"
+output: html_document
+---
+install.packages(c("ranger", "xgboost", "earth", "kknn", "nnet", "glmnet", "rpart"))
+install.packages('doParallel')
+
+```{r}
+knitr::opts_chunk$set(cache = TRUE, message = FALSE, warning = FALSE)
+
+## Load libraries
+library(tidymodels)
+library(readxl)
+library(writexl)
+library(skimr)
+library(finetune)
+
+library(doParallel)
+all_cores <- parallel::detectCores(logical = FALSE)
+num_cores <- floor(all_cores * (2/3)); num_cores <- max(1, num_cores)
+registerDoParallel(cores = num_cores)
+print(paste("전체 코어:", all_cores, "/ 사용 코어:", num_cores))
+```
+
+```{r}
+## load data
+medical <- read.csv('../mydata/clean_medical.csv')
+
+## load etc.
+cols_per_category <- readRDS('../useful/카테고리별컬럼목록.rds')
+categorical_col <- readRDS('../useful/범주형변수목록.rds')
+numerical_col <- readRDS('../useful/수치형변수목록.rds')
+
+## as.factor
+medical <- medical %>% mutate(across(all_of(categorical_col), as.factor))
+head(medical)
+```
+
+```{r}
+## split the data
+data_split <- initial_split(medical, prop=0.8, strata=annual_medical_cost)
+train <- training(data_split); test <- testing(data_split)
+
+cv_folds <- vfold_cv(train, v=3, strata=annual_medical_cost)
+cv_folds_for_racing <- vfold_cv(train, v=10, strata=annual_medical_cost)
+```
+
+```{r}
+## Preprocessing : recipe
+basic_rec <-
+  recipe(annual_medical_cost ~ ., data = train) %>% 
+  step_zv(all_predictors()) %>%  
+  step_YeoJohnson(all_numeric_predictors()) %>%  
+  step_corr(all_numeric_predictors(), threshold=0.9)
+
+normalized_rec <-
+  basic_rec %>%
+  step_normalize(all_numeric_predictors()) 
+
+dummy_rec <-
+  normalized_rec %>%
+  step_dummy(all_nominal_predictors())
+```
+
+```{r}
+## common setting
+gd_ctrl <- control_grid(save_pred = TRUE, parallel_over = "everything")
+ra_ctrl <- control_race(save_pred = TRUE, parallel_over = "everything")
+bo_ctrl <- control_bayes(save_pred = TRUE, parallel_over = "everything")
+
+regression_metrics <- metric_set(rmse, mae)
+```
+
+```{r}
+## GLM
+glmnet_spec <- 
+  linear_reg(penalty = tune(), mixture = tune()) %>% 
+  set_engine("glmnet")
+
+glm_wflow <-
+  workflow() %>%
+  add_model(glmnet_spec) %>%
+  add_recipe(dummy_rec)
+
+glm_tune <-
+  glm_wflow %>%
+  tune_grid(
+    cv_folds,
+    grid=20,
+    control=gd_ctrl,
+    metrics=regression_metrics
+  )
+
+show_best(glm_tune, metric="rmse"); best_glm <- select_best(glm_tune)
+```
+
+```{r}
+glm_race <-
+  glm_wflow %>%
+  tune_race_anova(
+    cv_folds_for_racing,
+    grid=20,
+    control=ra_ctrl,
+    metrics=regression_metrics
+  )
+
+show_best(glm_race, metric="rmse")#; best_glm_using_race <- select_best(glm_race)
+```
+```{r}
+## Regression Tree
+cart_spec <-  
+  decision_tree(cost_complexity = tune(), min_n = tune()) %>%  
+  set_engine("rpart") %>%  
+  set_mode("regression") 
+
+cart_wflow <-
+  workflow() %>%
+  add_model(cart_spec) %>%
+  add_recipe(dummy_rec)
+
+cart_tune <-
+  cart_wflow %>%
+  tune_grid(
+    cv_folds,
+    grid=20,
+    control=gd_ctrl,
+    metrics=regression_metrics
+  )
+
+show_best(cart_tune, metric="rmse"); best_cart <- select_best(cart_tune)
+```
+
+```{r}
+cart_race <-
+  cart_wflow %>%
+  tune_race_anova(
+    cv_folds_for_racing,
+    grid=20,
+    control=ra_ctrl,
+    metrics=regression_metrics
+  )
+
+show_best(cart_race, metric="rmse")#; best_cart_using_race <- select_best(cart_race)
+```
+
+```{r}
+## Random Forest
+rf_spec <- 
+  rand_forest(mtry=tune(), min_n = tune(), trees = 500) %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression")
+
+rf_wflow <-
+  workflow() %>%
+  add_model(rf_spec) %>%
+  add_recipe(basic_rec)
+
+rf_params <- 
+  rf_wflow %>% 
+  extract_parameter_set_dials() %>% 
+  finalize(train)
+```
+
+```{r}
+rf_tune <-
+  rf_wflow %>%
+  tune_grid(
+    cv_folds,
+    grid=20,
+    param_info = rf_params,
+    control=gd_ctrl,
+    metrics=regression_metrics
+  )
+
+show_best(rf_tune, metric="rmse"); best_rf <- select_best(rf_tune)
+```
+
+```{r}
+rf_race <-
+  rf_wflow %>%
+  tune_race_anova(
+    cv_folds_for_racing,
+    grid=20,
+    param_info = rf_params,
+    control=ra_ctrl,
+    metrics=regression_metrics
+  )
+
+show_best(rf_race, metric="rmse")#; best_rf_using_race <- select_best(rf_race)
+```
+
+```{r}
+rf_bayes <-
+  rf_wflow %>%
+  tune_bayes(
+    cv_folds_for_racing,
+    param_info = rf_params,
+    initial = 5, 
+    iter = 15, 
+    control=bo_ctrl,
+    metrics=regression_metrics
+  )
+
+show_best(rf_bayes, metric="rmse")#; best_rf_using_bayes <- select_best(rf_bayes)
+```
+
+```{r}
+xgb_spec <- 
+  boost_tree(tree_depth = tune(), learn_rate = tune(), trees = 500) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("regression")
+
+xgb_wflow <-
+  workflow() %>%
+  add_model(xgb_spec) %>%
+  add_recipe(dummy_rec)
+```
+
+```{r}
+xgb_tune <-
+  xgb_wflow %>%
+  tune_grid(
+    cv_folds,
+    grid=20,
+    control=gd_ctrl,
+    metrics=regression_metrics
+  )
+
+show_best(xgb_tune, metric="rmse"); best_xgb <- select_best(xgb_tune)
+```
+
+```{r}
+xgb_race <-
+  xgb_wflow %>%
+  tune_race_anova(
+    cv_folds_for_racing,
+    grid=20,
+    control=ra_ctrl,
+    metrics=regression_metrics
+  )
+
+show_best(xgb_race, metric="rmse")#; best_xgb_using_race <- select_best(xgb_race)
+```
+
+```{r}
+xgb_bayes <-
+  xgb_wflow %>%
+  tune_bayes(
+    cv_folds_for_racing,
+    initial = 5, 
+    iter = 15, 
+    control=bo_ctrl,
+    metrics=regression_metrics
+  )
+
+show_best(xgb_bayes, metric="rmse")#; best_xgb_using_bayes <- select_best(xgb_bayes)
+```
+
+```{r}
+knn_spec <-  
+  nearest_neighbor(neighbors = tune(), dist_power = tune(), weight_func = tune()) %>%  
+  set_engine("kknn") %>%  
+  set_mode("regression")
+
+knn_wflow <-
+  workflow() %>%
+  add_model(knn_spec) %>%
+  add_recipe(dummy_rec)
+```
+
+```{r}
+knn_tune <-
+  knn_wflow %>%
+  tune_grid(
+    cv_folds,
+    grid=10,
+    control=gd_ctrl,
+    metrics=regression_metrics
+  )
+
+show_best(knn_tune, metric="rmse"); best_knn <- select_best(knn_tune)
+```
+
+```{r}
+knn_race <-
+  knn_wflow %>%
+  tune_race_anova(
+    cv_folds_for_racing,
+    grid=10,
+    control=ra_ctrl,
+    metrics=regression_metrics
+  )
+
+show_best(knn_race, metric="rmse")#; best_knn_using_race <- select_best(knn_race)
+```
+
+```{r}
+nnet_spec <-  
+  mlp(hidden_units = tune(), penalty = tune(), epochs = tune()) %>%  
+  set_engine("nnet", MaxNWts = 3500) %>%  
+  set_mode("regression")
+
+mars_spec <-  
+  mars(num_terms = tune(), prod_degree = tune(), prune_method = "none") %>%  
+  set_engine("earth") %>%  
+  set_mode("regression") 
+```
+

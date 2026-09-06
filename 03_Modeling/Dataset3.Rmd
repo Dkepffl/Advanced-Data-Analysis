@@ -1,0 +1,350 @@
+---
+title: "baseline"
+author: "Youn Yeowon"
+date: "2025-11-19"
+output: html_document
+---
+install.packages(c("ranger", "xgboost", "earth", "kknn", "nnet", "glmnet", "rpart"))
+install.packages('doParallel')
+
+## setting
+```{r}
+knitr::opts_chunk$set(cache = TRUE, message = FALSE, warning = FALSE)
+
+## Load libraries
+library(tidymodels)
+library(readxl)
+library(writexl)
+library(skimr)
+library(finetune)
+library(stacks)
+library(doParallel)
+
+all_cores <- parallel::detectCores(logical = FALSE)
+num_cores <- floor(all_cores * (2/3)); num_cores <- max(1, num_cores)
+registerDoParallel(cores = num_cores)
+print(paste("전체 코어:", all_cores, "/ 사용 코어:", num_cores))
+```
+
+```{r}
+## load data
+medical <- read.csv('../mydata/myscore_medical.csv')
+
+## load etc.
+cols_per_category <- readRDS('../useful/카테고리별컬럼목록.rds')
+categorical_col <- readRDS('../useful/myscore_범주형변수목록.rds')
+numerical_col <- readRDS('../useful/myscore_수치형변수목록.rds')
+
+## as.factor
+medical <- medical %>% mutate(across(all_of(categorical_col), as.factor))
+head(medical)
+```
+
+```{r}
+## split the data
+data_split <- initial_split(medical, prop=0.8, strata=annual_medical_cost)
+train <- training(data_split); test <- testing(data_split)
+
+cv_folds_for_racing <- vfold_cv(train, v=10, strata=annual_medical_cost)
+```
+
+```{r}
+## Preprocessing : recipe
+basic_rec <-
+  recipe(annual_medical_cost ~ ., data = train) %>% 
+  step_zv(all_predictors()) %>%  
+  step_YeoJohnson(all_numeric_predictors()) %>%  
+  step_corr(all_numeric_predictors(), threshold=0.9)
+
+normalized_rec <-
+  basic_rec %>%
+  step_normalize(all_numeric_predictors()) 
+
+dummy_rec <-
+  normalized_rec %>%
+  step_dummy(all_nominal_predictors())
+```
+
+```{r}
+## common setting
+ra_ctrl <- control_race(save_pred = TRUE, 
+                        parallel_over = "everything",
+                        save_workflow = TRUE)
+
+regression_metrics <- metric_set(rmse, mae)
+```
+
+## Fit the each models with 10 cv folds
+```{r}
+## GLM
+glmnet_spec <- 
+  linear_reg(penalty = tune(), mixture = tune()) %>% 
+  set_engine("glmnet")
+
+glm_wflow <-
+  workflow() %>%
+  add_model(glmnet_spec) %>%
+  add_recipe(dummy_rec)
+
+glm_race <-
+  glm_wflow %>%
+  tune_race_anova(
+    cv_folds_for_racing,
+    grid=20,
+    control=ra_ctrl,
+    metrics=regression_metrics
+  )
+
+show_best(glm_race, metric="rmse")
+best_glm <- select_best(glm_race, metric="rmse")
+```
+
+```{r}
+## Regression Tree
+cart_spec <-  
+  decision_tree(cost_complexity = tune(), min_n = tune()) %>%  
+  set_engine("rpart") %>%  
+  set_mode("regression") 
+
+cart_wflow <-
+  workflow() %>%
+  add_model(cart_spec) %>%
+  add_recipe(normalized_rec)
+
+cart_race <-
+  cart_wflow %>%
+  tune_race_anova(
+    cv_folds_for_racing,
+    grid=20,
+    control=ra_ctrl,
+    metrics=regression_metrics
+  )
+
+show_best(cart_race, metric="rmse")
+best_cart <- select_best(cart_race, metric="rmse")
+```
+
+```{r}
+## Random Forest
+rf_spec <- 
+  rand_forest(min_n=20, trees = 50) %>% 
+  set_engine("ranger",importance = "impurity") %>% 
+  set_mode("regression")
+
+rf_wflow <-
+  workflow() %>%
+  add_model(rf_spec) %>%
+  add_recipe(basic_rec)
+
+rf_cv_results <- 
+  fit_resamples(
+    rf_wflow,
+    resamples = cv_folds_for_racing,
+    metrics = metric_set(rmse, rsq),
+    control = control_resamples(
+      verbose = TRUE, save_pred = TRUE, save_workflow = TRUE)
+  )
+
+collect_metrics(rf_cv_results)
+```
+
+```{r}
+xgb_spec <- 
+  boost_tree(tree_depth=20, trees=50, learn_rate=0.01) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("regression")
+
+xgb_wflow <-
+  workflow() %>%
+  add_model(xgb_spec) %>%
+  add_recipe(dummy_rec)
+
+xgb_cv_results <- 
+  fit_resamples(
+    xgb_wflow,
+    resamples = cv_folds_for_racing,
+    metrics = metric_set(rmse, rsq),
+    control = control_resamples(
+      verbose = TRUE, save_pred = TRUE, save_workflow = TRUE
+      )
+  )
+
+collect_metrics(xgb_cv_results)
+```
+
+```{r}
+knn_spec <-  
+  nearest_neighbor(neighbors = tune()) %>%  
+  set_engine("kknn") %>%  
+  set_mode("regression")
+
+knn_wflow <-
+  workflow() %>%
+  add_model(knn_spec) %>%
+  add_recipe(dummy_rec)
+
+knn_race <-
+  knn_wflow %>%
+  tune_race_anova(
+    cv_folds_for_racing,
+    grid=10,
+    control=ra_ctrl,
+    metrics=regression_metrics
+  )
+
+show_best(knn_race, metric="rmse")
+best_knn <- select_best(knn_race, metric="rmse")
+```
+
+```{r}
+nnet_spec <-  
+  mlp(hidden_units=20, penalty=0.1, epochs=300) %>%  
+  set_engine("nnet", MaxNWts = 5000) %>%  
+  set_mode("regression")
+
+nnet_rec <- 
+  dummy_rec %>%
+  step_log(annual_medical_cost, offset = 1, skip=T)
+
+nnet_wflow <-
+  workflow() %>%
+  add_model(nnet_spec) %>%
+  add_recipe(nnet_rec)
+
+nnet_cv_results <- 
+  fit_resamples(
+    nnet_wflow,
+    resamples = cv_folds_for_racing,
+    metrics = metric_set(rmse, rsq),
+    control = control_resamples(
+      verbose = TRUE, save_pred = TRUE, save_workflow = TRUE
+      )
+  )
+
+collect_metrics(nnet_cv_results)
+```
+
+## Stacking
+```{r}
+## Stacking
+medical_stack <- 
+  stacks() %>%
+  add_candidates(glm_race) %>%
+  add_candidates(cart_race) %>%
+  add_candidates(rf_cv_results) %>%
+  add_candidates(xgb_cv_results) %>%
+  add_candidates(knn_race)
+
+medical_blend <- 
+  medical_stack %>%
+  blend_predictions()
+```
+
+```{r}
+autoplot(medical_blend)
+```
+
+```{r}
+medical_stack_model <- 
+  medical_blend %>%
+  fit_members()
+```
+
+## Final Fitting
+```{r}
+library(purrr)
+```
+
+```{r}
+final_glm_wflow  <- glm_wflow %>% finalize_workflow(best_glm)
+final_cart_wflow <- cart_wflow %>% finalize_workflow(best_cart)
+final_knn_wflow  <- knn_wflow %>% finalize_workflow(best_knn)
+
+all_final_workflows <- list(
+  GLM = final_glm_wflow,
+  CART = final_cart_wflow,
+  KNN = final_knn_wflow,
+  RF = rf_wflow,
+  XGB = xgb_wflow,
+  NNet = nnet_wflow 
+)
+```
+
+```{r}
+evaluate_model <- function(model_obj, model_name, train_data, test_data) {
+  
+  if (model_name == "Stacking") {
+    fitted_model <- model_obj
+  } else {
+    fitted_model <- fit(model_obj, data = train_data)
+  }
+  
+  calc_metrics <- function(data, type) {
+    preds <- predict(fitted_model, new_data = data) %>%
+      bind_cols(data)
+    
+    if (model_name == "NNet") {
+      preds <- preds %>%
+        mutate(
+          .pred = exp(.pred) - 1
+        )
+    }
+    
+    preds %>%
+      metrics(truth = annual_medical_cost, estimate = .pred) %>%
+      filter(.metric %in% c("rmse", "rsq", "mae")) %>%
+      mutate(model = model_name, data = type)
+  }
+  
+  bind_rows(calc_metrics(train_data, "Train"), 
+            calc_metrics(test_data, "Test"))
+}
+```
+
+```{r}
+# GLM~MLP
+single_results <- imap_dfr(all_final_workflows, function(wflow, name) {
+  evaluate_model(wflow, name, train, test)
+})
+
+# Stacking
+stacking_results <- evaluate_model(medical_stack_model, "Stacking", 
+                                   train, test)  
+```
+
+```{r}
+final_report <- 
+  bind_rows(single_results, stacking_results) %>%
+  select(model, data, .metric, .estimate) %>%
+  pivot_wider(names_from = c(data, .metric), values_from = .estimate) %>%
+  dplyr::select(model, 
+                ends_with("rmse"), 
+                ends_with("rsq"), 
+                ends_with("mae")) %>%
+  arrange(Test_rmse)
+```
+
+```{r}
+print("최종 모델 성능 비교표")
+print(final_report)
+```
+
+```{r}
+final_report %>%
+  pivot_longer(
+    cols = -model, 
+    names_to = c("Data", "Metric"), 
+    names_sep = "_" 
+  ) %>%
+  mutate(model = factor(model, levels = final_report$model)) %>%
+  ggplot(aes(x = value, y = model)) +
+  geom_line(aes(group = model), color = "gray50", linewidth = 1) +
+  geom_point(aes(color = Data), size = 2) +
+  facet_wrap(~Metric, scales = "free_x") + 
+  scale_color_manual(values = c("Train" = "blue", "Test" = "red")) +
+  labs(title = "Model Performance Comparison",
+       x = "Metric Value",
+       y = NULL) +
+  theme(plot.title=element_text(hjust=0.5))
+```
+
