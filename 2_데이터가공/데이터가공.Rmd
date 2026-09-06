@@ -1,0 +1,127 @@
+---
+title: "데이터가공"
+author: "Youn Yeowon"
+date: "2025-11-25"
+output: html_document
+---
+
+```{r}
+## Load libraries
+library(tidyverse)
+library(stringr)
+```
+
+```{r}
+## load data
+medical <- read.csv('../mydata/clean_medical.csv')
+
+## load etc.
+cols_per_category <- readRDS('../useful/카테고리별컬럼목록.rds')
+categorical_col <- readRDS('../useful/범주형변수목록.rds')
+numerical_col <- readRDS('../useful/수치형변수목록.rds')
+
+## as.factor
+medical <- medical %>% 
+  mutate(across(all_of(categorical_col), as.factor))
+```
+
+```{r}
+cols_per_category 
+```
+
+```{r}
+target_cols <- c(
+  "hypertension", "diabetes", "copd", "cardiovascular_disease",
+  "cancer_history", "kidney_disease", "liver_disease", 
+  "arthritis", "asthma", "mental_health"
+)
+
+medical_processed <- medical %>%
+  mutate(
+    bmi_class = case_when(
+      bmi < 18.5 ~ "Underweight",
+      bmi >= 18.5 & bmi < 25 ~ "Normal",
+      bmi >= 25 & bmi < 30 ~ "Overweight",
+      bmi >= 30 ~ "Obese",
+      TRUE ~ "Unknown" # 예외 처리
+    ),
+    
+    is_smoker = ifelse(smoker == "Current", 1, 0),
+    
+    my_risk_score = rowSums(
+      across(all_of(target_cols), ~ as.numeric(as.character(.))), 
+      na.rm = TRUE # 결측치(NA)가 있으면 0으로 처리하고 더함
+    )
+  ) %>%
+  mutate(
+    across(c(bmi_class, is_smoker), as.factor)
+  )
+```
+
+```{r}
+medical1 <- medical_processed %>% 
+  dplyr::select(-bmi, -smoker, -my_risk_score)
+
+categorical_col1 <- c(categorical_col, 'bmi_class', 'is_smoker')
+categorical_col1 <- setdiff(categorical_col1, c("bmi", "smoker"))
+numerical_col1 <- numerical_col
+
+write.csv(medical1, '../mydata/groupedbmi_medical.csv', row.names = FALSE)
+saveRDS(medical1, '../mydata/groupedbmi_medical.rds')
+saveRDS(categorical_col1, '../useful/groupedbmi_범주형변수목록.rds')
+saveRDS(numerical_col1, '../useful/groupedbmi_수치형변수목록.rds')
+```
+
+```{r}
+medical2 <- medical_processed %>% 
+  dplyr::select(-bmi_class, -is_smoker, -risk_score)
+
+categorical_col2 <- categorical_col
+numerical_col2 <- c(numerical_col, 'my_risk_score')
+numerical_col2 <- setdiff(numerical_col2, c("risk_score"))
+
+write.csv(medical2, '../mydata/myscore_medical.csv', row.names = FALSE)
+saveRDS(medical2, '../mydata/myscore_medical.rds')
+saveRDS(categorical_col2, '../useful/myscore_범주형변수목록.rds')
+saveRDS(numerical_col2, '../useful/myscore_수치형변수목록.rds')
+```
+
+```{r}
+medical3 <- medical_processed %>% dplyr::select(-bmi, -smoker, -risk_score)
+
+categorical_col3 <- c(categorical_col, 'bmi_class', 'is_smoker')
+numerical_col3 <- c(numerical_col, 'my_risk_score')
+
+categorical_col3 <- setdiff(categorical_col3, c("bmi", "smoker"))
+numerical_col3 <- setdiff(numerical_col3, c("risk_score"))
+
+write.csv(medical3, '../mydata/all_medical.csv', row.names = FALSE)
+saveRDS(medical3, '../mydata/all_medical.rds')
+saveRDS(categorical_col3, '../useful/all_범주형변수목록.rds')
+saveRDS(numerical_col3, '../useful/all_수치형변수목록.rds')
+```
+
+```{r}
+is_outlier <- function(x) {
+  quantiles <- quantile(x, probs = c(0.25, 0.75), na.rm = TRUE)
+  Q1 <- quantiles[1]
+  Q3 <- quantiles[2]
+  IQR <- Q3 - Q1
+  
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  
+  return(x < lower_bound | x > upper_bound)
+}
+
+medical_clean <- medical3 %>%
+  filter(!if_any(where(is.numeric), is_outlier))
+
+# 결과 확인
+print(paste("제거 전 행 개수:", nrow(medical)))
+print(paste("제거 후 행 개수:", nrow(medical_clean)))
+
+write.csv(medical3, '../mydata/all_IQR_medical.csv', row.names = FALSE)
+saveRDS(medical3, '../mydata/all_IQR_medical.rds')
+```
+
